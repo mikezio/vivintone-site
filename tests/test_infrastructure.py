@@ -28,7 +28,9 @@ class InfrastructureContractTests(unittest.TestCase):
 
         self.assertIn("UserPoolTier: ESSENTIALS", contributor_pool)
         self.assertIn("UsernameAttributes: [email, phone_number]", contributor_pool)
-        self.assertIn("AutoVerifiedAttributes: [email, phone_number]", contributor_pool)
+        self.assertIn("AutoVerifiedAttributes: !If", contributor_pool)
+        self.assertIn("- [email, phone_number]", contributor_pool)
+        self.assertIn("- [email]", contributor_pool)
         self.assertIn("MfaConfiguration: 'OFF'", contributor_pool)
         self.assertIn("AllowedFirstAuthFactors: !If", contributor_pool)
         self.assertIn("- [PASSWORD, EMAIL_OTP, SMS_OTP]", contributor_pool)

@@ -341,7 +341,10 @@ Resources:
       DeletionProtection: ACTIVE
       UsernameConfiguration: { CaseSensitive: false }
       UsernameAttributes: [email, phone_number]
-      AutoVerifiedAttributes: [email, phone_number]
+      AutoVerifiedAttributes: !If
+        - ContributorSmsEnabledCondition
+        - [email, phone_number]
+        - [email]
       MfaConfiguration: 'OFF'
       Policies:
         SignInPolicy:
