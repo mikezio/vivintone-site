@@ -7,6 +7,12 @@ The site is intentionally separate from Mike Ziolkowski's `mzio.dev` portfolio.
 Its production hostname is `vivintone.mzio.dev`; the portfolio does not link to
 it.
 
+Voluntary project support is available through
+[Buy Me a Coffee](https://buymeacoffee.com/mzio) and
+[GitHub Sponsors](https://github.com/sponsors/mikezio). These contributions are
+separate from hardware shipping and reimbursements and do not purchase device
+compatibility, support priority, or access to private research.
+
 ## Architecture
 
 - Static site: private S3 origin behind CloudFront
