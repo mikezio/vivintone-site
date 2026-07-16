@@ -347,8 +347,8 @@ Resources:
         SignInPolicy:
           AllowedFirstAuthFactors: !If
             - ContributorSmsEnabledCondition
-            - [EMAIL_OTP, SMS_OTP]
-            - [EMAIL_OTP]
+            - [PASSWORD, EMAIL_OTP, SMS_OTP]
+            - [PASSWORD, EMAIL_OTP]
       EmailConfiguration:
         EmailSendingAccount: DEVELOPER
         From: !Sub 'VivintOne Contributor Portal <portal@${SiteSubdomain}.${RootDomain}>'
