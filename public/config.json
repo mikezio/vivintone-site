@@ -1,0 +1,6 @@
+{
+  "authority": "__COGNITO_AUTHORITY__",
+  "clientId": "__COGNITO_CLIENT_ID__",
+  "redirectUri": "https://vivintone.mzio.dev/admin.html",
+  "postLogoutRedirectUri": "https://vivintone.mzio.dev/"
+}

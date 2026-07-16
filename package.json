@@ -1,0 +1,24 @@
+{
+  "name": "vivintone-site",
+  "version": "0.1.0",
+  "private": true,
+  "description": "VivintOne project site and managed hardware compatibility workflow",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "test": "python -m unittest discover -s tests -v",
+    "check": "python -m py_compile functions/api/handler.py && python -m json.tool functions/api/catalog_seed.json >/dev/null && vite build"
+  },
+  "dependencies": {
+    "@cloudscape-design/collection-hooks": "1.0.102",
+    "@cloudscape-design/components": "3.0.1329",
+    "@cloudscape-design/global-styles": "1.0.62",
+    "oidc-client-ts": "3.5.0",
+    "react": "19.2.7",
+    "react-dom": "19.2.7"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "6.0.3",
+    "vite": "8.1.5"
+  }
+}
