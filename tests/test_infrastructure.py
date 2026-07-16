@@ -31,6 +31,11 @@ class InfrastructureContractTests(unittest.TestCase):
         self.assertIn("cp functions/api/*.py functions/api/catalog_seed.json", DEPLOY)
         self.assertIn("cloudformation validate-template", DEPLOY)
 
+    def test_cloudfront_uses_managed_cache_policy_ids(self):
+        self.assertIn("CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6", TEMPLATE)
+        self.assertIn("CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad", TEMPLATE)
+        self.assertNotIn("413f1608-43d4-4c27-9936-63d7e8ef1e85", TEMPLATE)
+
     def test_cloudformation_exposes_every_handler_route(self):
         handler_routes = set(re.findall(r'"((?:GET|POST|PUT|PATCH|DELETE) /api/[^"]+)"', HANDLER))
         template_routes = set(re.findall(r"RouteKey: '([^']+)'", TEMPLATE))

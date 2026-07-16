@@ -629,7 +629,7 @@ Resources:
             AllowedMethods: [GET, HEAD, OPTIONS, PUT, PATCH, POST, DELETE]
             CachedMethods: [GET, HEAD, OPTIONS]
             Compress: true
-            CachePolicyId: 413f1608-43d4-4c27-9936-63d7e8ef1e85
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
             OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
             ResponseHeadersPolicyId: !Ref SecurityHeaders
 
