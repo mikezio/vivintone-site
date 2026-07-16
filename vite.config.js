@@ -10,6 +10,7 @@ export default defineConfig({
         main: resolve(import.meta.dirname, 'index.html'),
         admin: resolve(import.meta.dirname, 'admin.html'),
         request: resolve(import.meta.dirname, 'request.html'),
+        portal: resolve(import.meta.dirname, 'portal.html'),
       },
     },
   },

@@ -8,6 +8,12 @@ ROOT_DOMAIN="${ROOT_DOMAIN:-mzio.dev}"
 SITE_SUBDOMAIN="${SITE_SUBDOMAIN:-vivintone}"
 ADMIN_EMAIL="${ADMIN_EMAIL:-michael@mzio.dev}"
 ADMIN_USERNAME="${ADMIN_USERNAME:-admin}"
+CONTRIBUTOR_SMS_ENABLED="${CONTRIBUTOR_SMS_ENABLED:-false}"
+
+if [[ "$CONTRIBUTOR_SMS_ENABLED" != "true" && "$CONTRIBUTOR_SMS_ENABLED" != "false" ]]; then
+  echo "CONTRIBUTOR_SMS_ENABLED must be true or false." >&2
+  exit 1
+fi
 
 for command in aws npm python zip jq; do
   command -v "$command" >/dev/null || { echo "Missing required command: $command" >&2; exit 1; }
@@ -66,6 +72,7 @@ aws cloudformation deploy \
     SiteSubdomain="$SITE_SUBDOMAIN" \
     AdminEmail="$ADMIN_EMAIL" \
     AdminUsername="$ADMIN_USERNAME" \
+    ContributorSmsEnabled="$CONTRIBUTOR_SMS_ENABLED" \
     ArtifactBucket="$ARTIFACT_BUCKET" \
     ArtifactKey="$ARTIFACT_KEY"
 
@@ -76,13 +83,20 @@ SITE_BUCKET="$(value SiteBucketName)"
 DISTRIBUTION_ID="$(value DistributionId)"
 AUTHORITY="$(value CognitoAuthority)"
 CLIENT_ID="$(value CognitoClientId)"
+CONTRIBUTOR_POOL_ID="$(value ContributorUserPoolId)"
+CONTRIBUTOR_CLIENT_ID="$(value ContributorUserPoolClientId)"
+CONTRIBUTOR_SMS_ENABLED="$(value ContributorSmsEnabled)"
 
 jq -n \
   --arg authority "$AUTHORITY" \
   --arg clientId "$CLIENT_ID" \
+  --arg region "$AWS_REGION" \
+  --arg contributorPoolId "$CONTRIBUTOR_POOL_ID" \
+  --arg contributorClientId "$CONTRIBUTOR_CLIENT_ID" \
+  --argjson contributorSmsEnabled "$CONTRIBUTOR_SMS_ENABLED" \
   --arg redirectUri "$SITE_URL/admin.html" \
   --arg postLogoutRedirectUri "$SITE_URL/" \
-  '{authority:$authority,clientId:$clientId,redirectUri:$redirectUri,postLogoutRedirectUri:$postLogoutRedirectUri}' > dist/config.json
+  '{authority:$authority,clientId:$clientId,region:$region,contributorPoolId:$contributorPoolId,contributorClientId:$contributorClientId,contributorSmsEnabled:$contributorSmsEnabled,redirectUri:$redirectUri,postLogoutRedirectUri:$postLogoutRedirectUri}' > dist/config.json
 
 aws s3 sync dist "s3://${SITE_BUCKET}" --delete --cache-control 'no-cache,no-store,must-revalidate' --only-show-errors
 aws s3 cp dist/assets "s3://${SITE_BUCKET}/assets" --recursive --cache-control 'public,max-age=31536000,immutable' --only-show-errors
@@ -90,4 +104,6 @@ aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION_ID" --paths 
 
 echo "Deployed: $SITE_URL"
 echo "Admin:    $SITE_URL/admin.html"
+echo "Portal:   $SITE_URL/portal.html"
+echo "Contributor verification: email OTP (SMS OTP enabled: $CONTRIBUTOR_SMS_ENABLED)"
 echo "Next: sign in with $ADMIN_USERNAME, set a permanent password/MFA, then configure shipping and EasyPost in Settings."

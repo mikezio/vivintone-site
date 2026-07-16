@@ -53,8 +53,10 @@ ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "michael@mzio.dev")
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 SITE_URL = os.getenv("SITE_URL", "https://vivintone.mzio.dev")
 REGION = os.getenv("AWS_REGION", "us-east-1")
+SMS_ENABLED = os.getenv("CONTRIBUTOR_SMS_ENABLED", "false").strip().casefold() == "true"
 
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+PHONE_RE = re.compile(r"^\+[1-9][0-9]{7,14}$")
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._()/#,+&-]{0,119}$")
 URL_RE = re.compile(r"^https://[A-Za-z0-9.-]+(?:/[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]*)?$")
 REQUEST_STATUSES = {"submitted", "reviewing", "on_hold", "info_requested", "approved", "declined", "received", "reimbursed", "closed"}
@@ -156,7 +158,7 @@ def _multiline(value: Any, maximum: int) -> str:
     return normalized
 
 
-def validate_submission(body: dict[str, Any]) -> dict[str, Any]:
+def validate_submission(body: dict[str, Any], *, require_email: bool = True) -> dict[str, Any]:
     """Return a normalized public submission or raise a safe validation code."""
     if body.get("website"):
         raise ValueError("invalid_submission")
@@ -164,9 +166,12 @@ def validate_submission(body: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("confirmation_required")
 
     name = _text(body.get("name"), 100, required=True)
-    email = _text(body.get("email"), 254, required=True).lower()
-    if not EMAIL_RE.fullmatch(email):
+    email = _text(body.get("email"), 254, required=require_email).lower()
+    if email and not EMAIL_RE.fullmatch(email):
         raise ValueError("invalid_email")
+    phone = _normalize_phone(body.get("phone")) if body.get("phone") else ""
+    if phone and not PHONE_RE.fullmatch(phone):
+        raise ValueError("invalid_phone")
     offer_type = _text(body.get("offerType"), 20, required=True)
     if offer_type not in {"donate", "loan", "remote_test", "unsure"}:
         raise ValueError("invalid_offer_type")
@@ -182,6 +187,7 @@ def validate_submission(body: dict[str, Any]) -> dict[str, Any]:
     return {
         "name": name,
         "email": email,
+        "phone": phone,
         "country": _text(body.get("country"), 80, required=True),
         "offerType": offer_type,
         "catalogId": _text(body.get("catalogId"), 100),
@@ -247,6 +253,71 @@ def _label_download_url(request_id: str, key: str) -> str:
 
 def _token_hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _normalize_email(value: Any) -> str:
+    return str(value or "").strip().casefold()
+
+
+def _normalize_phone(value: Any) -> str:
+    raw = str(value or "").strip()
+    digits = re.sub(r"[^0-9]", "", raw)
+    return f"+{digits}" if digits else ""
+
+
+def _claim_is_verified(value: Any) -> bool:
+    return value is True or (isinstance(value, str) and value.casefold() == "true")
+
+
+def _contributor_claims(event: dict[str, Any]) -> dict[str, str]:
+    """Return only verified, normalized contributor identities from JWT claims."""
+    claims = (
+        event.get("requestContext", {})
+        .get("authorizer", {})
+        .get("jwt", {})
+        .get("claims", {})
+    )
+    if not isinstance(claims, dict):
+        raise PermissionError("verified_identity_required")
+    identities: dict[str, str] = {}
+    email = _normalize_email(claims.get("email"))
+    if email and EMAIL_RE.fullmatch(email) and _claim_is_verified(claims.get("email_verified")):
+        identities["email"] = email
+    phone = _normalize_phone(claims.get("phone_number"))
+    if phone and PHONE_RE.fullmatch(phone) and _claim_is_verified(claims.get("phone_number_verified")):
+        identities["phone"] = phone
+    if not identities:
+        raise PermissionError("verified_identity_required")
+    return identities
+
+
+def _owner_key(kind: str, identity: str) -> str:
+    return f"OWNER#{kind.upper()}#{_identity_hash(identity)}"
+
+
+def _identity_hash(identity: str) -> str:
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+def _owns_request(item: dict[str, Any], identities: dict[str, str]) -> bool:
+    """Constant-time match of a verified claim against normalized request identity."""
+    matched = False
+    request_email = _normalize_email(item.get("email"))
+    request_phone = _normalize_phone(item.get("phone"))
+    has_hashed_owners = bool(item.get("ownerEmailHash") or item.get("ownerPhoneHash"))
+    if "email" in identities:
+        expected_hash = str(item.get("ownerEmailHash") or "")
+        if expected_hash:
+            matched |= secrets.compare_digest(expected_hash, _identity_hash(identities["email"]))
+        elif not has_hashed_owners:
+            matched |= bool(request_email and secrets.compare_digest(request_email, identities["email"]))
+    if "phone" in identities:
+        expected_hash = str(item.get("ownerPhoneHash") or "")
+        if expected_hash:
+            matched |= secrets.compare_digest(expected_hash, _identity_hash(identities["phone"]))
+        elif not has_hashed_owners:
+            matched |= bool(request_phone and secrets.compare_digest(request_phone, identities["phone"]))
+    return matched
 
 
 def _valid_reimbursement_token(item: dict[str, Any], token: str) -> bool:
@@ -392,11 +463,14 @@ def _request_item(table, request_id: str) -> dict[str, Any]:
     return item
 
 
-def _create_request(table, body: dict[str, Any]) -> dict[str, Any]:
+def _create_request(
+    table, body: dict[str, Any], *, owner_identities: dict[str, str] | None = None,
+    require_email: bool = True, actor: str = "public",
+) -> dict[str, Any]:
     public_settings = _setting(table, "PUBLIC", DEFAULT_PUBLIC_SETTINGS)
     if not public_settings.get("acceptingOffers", True):
         raise RuntimeError("submissions_paused")
-    data = validate_submission(body)
+    data = validate_submission(body, require_email=require_email)
     created_at = _now()
     request_id = f"VOH-{datetime.now(timezone.utc):%Y%m%d}-{secrets.token_hex(3).upper()}"
     expires = int((datetime.now(timezone.utc) + timedelta(days=730)).timestamp())
@@ -414,7 +488,24 @@ def _create_request(table, body: dict[str, Any]) -> dict[str, Any]:
         "adminNotes": "",
         **data,
     }
+    if owner_identities is None:
+        owner_identities = {"email": data["email"]}
+        if data.get("phone"):
+            owner_identities["phone"] = data["phone"]
+    if owner_identities.get("email"):
+        item["ownerEmailHash"] = _identity_hash(owner_identities["email"])
+    if owner_identities.get("phone"):
+        item["ownerPhoneHash"] = _identity_hash(owner_identities["phone"])
     table.put_item(Item=item, ConditionExpression="attribute_not_exists(pk)")
+    for kind, identity in owner_identities.items():
+        table.put_item(Item={
+            "pk": _owner_key(kind, identity),
+            "sk": f"REQUEST#{request_id}",
+            "kind": "request_owner",
+            "requestId": request_id,
+            "createdAt": created_at,
+            "expiresAt": expires,
+        })
     if metrics:
         metrics.add_metric(name="HardwareRequestsCreated", unit=MetricUnit.Count, value=1)
     table.put_item(Item={
@@ -422,19 +513,20 @@ def _create_request(table, body: dict[str, Any]) -> dict[str, Any]:
         "sk": f"EVENT#{created_at}#{secrets.token_hex(3)}",
         "kind": "audit",
         "action": "submitted",
-        "actor": "public",
+        "actor": actor,
         "createdAt": created_at,
     })
     templates = _setting(table, "TEMPLATES", DEFAULT_TEMPLATES)
     values = {"name": data["name"], "reference": request_id, "product": data["productName"]}
     try:
-        _send_email(data["email"], _render(templates["receivedSubject"], values), _render(templates["receivedBody"], values))
+        if data.get("email"):
+            _send_email(data["email"], _render(templates["receivedSubject"], values), _render(templates["receivedBody"], values))
         admin_body = (
             f"New VivintOne hardware request {request_id}\n\n"
             f"{data['name']} offered {data['quantity']} × {data['productName']} ({data['modelNumber']}) "
             f"as {data['offerType']}.\n\nReview: {SITE_URL}/admin.html?request={request_id}"
         )
-        _send_email(ADMIN_EMAIL, f"New VivintOne hardware request {request_id}", admin_body, reply_to=data["email"])
+        _send_email(ADMIN_EMAIL, f"New VivintOne hardware request {request_id}", admin_body, reply_to=data.get("email") or None)
     except ClientError:
         table.update_item(
             Key={"pk": item["pk"], "sk": "DETAIL"},
@@ -451,6 +543,172 @@ def _list_requests(table) -> list[dict[str, Any]]:
         ScanIndexForward=False,
     )
     return [{key: value for key, value in item.items() if key not in {"pk", "sk", "gsi1pk", "gsi1sk"}} for item in result.get("Items", [])]
+
+
+PORTAL_REQUEST_FIELDS = (
+    "requestId", "status", "createdAt", "updatedAt", "offerType", "productName",
+    "modelNumber", "quantity", "condition", "factoryReset", "removedFromAccount",
+    "accessories", "testingGoal", "notes", "photosAvailable", "decisionMessage",
+    "decidedAt", "reimbursementStatus", "reimbursementAmount", "reimbursementCurrency",
+    "reimbursementSubmittedAt", "reimbursedAt", "shippingMethod", "shippingCarrier",
+    "trackingNumber", "carrierStatus", "carrierStatusDescription", "carrierUpdatedAt",
+    "trackingUrl", "trackingSubmittedAt", "prepaidLabelAllowed", "labelMaxAmount",
+    "labelPurchaseState", "labelAmount", "labelPurchasedAt", "labelExpiresAt",
+)
+PORTAL_HISTORY_ACTIONS = {
+    "submitted", "updated", "approve", "decline", "hold", "request_info",
+    "tracking_submitted", "prepaid_label_requested", "prepaid_label_purchased",
+    "prepaid_label_refunded", "reimbursement_not_requested",
+    "reimbursement_submitted", "reimbursed",
+}
+
+
+def _portal_request(item: dict[str, Any]) -> dict[str, Any]:
+    result = {key: item[key] for key in PORTAL_REQUEST_FIELDS if key in item}
+    result["labelAvailable"] = bool(item.get("labelKey") and item.get("labelPurchaseState") == "purchased")
+    return result
+
+
+def _portal_request_history(table, request_id: str) -> list[dict[str, Any]]:
+    """Return a contributor-safe projection of request audit events."""
+    result = table.query(
+        KeyConditionExpression=Key("pk").eq(f"REQUEST#{request_id}") & Key("sk").begins_with("EVENT#")
+    )
+    history = []
+    for event in result.get("Items", []):
+        action = str(event.get("action") or "")
+        created_at = str(event.get("createdAt") or "")
+        if action not in PORTAL_HISTORY_ACTIONS or not created_at:
+            continue
+        safe_event = {
+            "action": action,
+            "createdAt": created_at,
+            "actorCategory": "contributor" if event.get("actor") in {"public", "contributor"} else "hardware_lab",
+        }
+        status = str(event.get("status") or "")
+        if status in REQUEST_STATUSES:
+            safe_event["status"] = status
+        history.append(safe_event)
+    return sorted(history, key=lambda event: event["createdAt"], reverse=True)
+
+
+def _portal_owned_request(table, request_id: str, identities: dict[str, str]) -> dict[str, Any]:
+    item = _request_item(table, request_id)
+    if not _owns_request(item, identities):
+        # Do not reveal whether another contributor's request exists.
+        raise LookupError("request_not_found")
+    return item
+
+
+def _portal_requests(table, identities: dict[str, str]) -> list[dict[str, Any]]:
+    request_ids: set[str] = set()
+    for kind, identity in identities.items():
+        result = table.query(KeyConditionExpression=Key("pk").eq(_owner_key(kind, identity)))
+        request_ids.update(
+            str(item.get("requestId")) for item in result.get("Items", []) if item.get("requestId")
+        )
+    requests = []
+    for request_id in request_ids:
+        try:
+            item = _portal_owned_request(table, request_id, identities)
+        except LookupError:
+            continue
+        requests.append(_portal_request(item))
+    return sorted(requests, key=lambda item: str(item.get("createdAt") or ""), reverse=True)
+
+
+def _verification_identity(body: dict[str, Any]) -> tuple[str, str]:
+    identity_type = _text(body.get("identityType"), 10, required=True)
+    raw_identity = _text(body.get("identity"), 254, required=True)
+    if identity_type == "email":
+        identity = _normalize_email(raw_identity)
+        if not EMAIL_RE.fullmatch(identity):
+            raise ValueError("invalid_email")
+    elif identity_type == "phone":
+        if not SMS_ENABLED:
+            raise RuntimeError("phone_verification_unavailable")
+        identity = raw_identity
+        if not PHONE_RE.fullmatch(identity):
+            raise ValueError("invalid_phone")
+    else:
+        raise ValueError("invalid_identity_type")
+    return identity_type, identity
+
+
+def _create_verification_intent(table, body: dict[str, Any]) -> dict[str, Any]:
+    if body.get("website"):
+        raise ValueError("invalid_submission")
+    identity_type, identity = _verification_identity(body)
+    token = secrets.token_urlsafe(32)
+    token_hash = _token_hash(token)
+    now_epoch = int(datetime.now(timezone.utc).timestamp())
+    expires_at = now_epoch + 600
+    table.put_item(
+        Item={
+            "pk": f"VERIFICATION_INTENT#{token_hash}",
+            "sk": "INTENT",
+            "kind": "verification_intent",
+            "intentTokenHash": token_hash,
+            "identityType": identity_type,
+            "identityHash": _identity_hash(identity),
+            "createdAt": _now(),
+            "expiresAt": expires_at,
+        },
+        ConditionExpression="attribute_not_exists(pk)",
+    )
+    return {"ok": True, "verificationIntentToken": token, "expiresIn": 600}
+
+
+def _consume_verification_intent(table, token: str, identity_type: str, identity: str) -> bool:
+    if not re.fullmatch(r"[A-Za-z0-9_-]{32,200}", token or ""):
+        return False
+    try:
+        table.delete_item(
+            Key={"pk": f"VERIFICATION_INTENT#{_token_hash(token)}", "sk": "INTENT"},
+            ConditionExpression="identityType = :kind AND identityHash = :identity AND expiresAt >= :now",
+            ExpressionAttributeValues={
+                ":kind": identity_type,
+                ":identity": _identity_hash(identity),
+                ":now": int(datetime.now(timezone.utc).timestamp()),
+            },
+        )
+        return True
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
+def _pre_signup(table, event: dict[str, Any]) -> dict[str, Any]:
+    attributes = (event.get("request") or {}).get("userAttributes") or {}
+    if not isinstance(attributes, dict):
+        raise PermissionError("contributor_request_required")
+    candidates: dict[str, str] = {}
+    email = _normalize_email(attributes.get("email"))
+    phone = _normalize_phone(attributes.get("phone_number"))
+    if email and EMAIL_RE.fullmatch(email):
+        candidates["email"] = email
+    if phone and PHONE_RE.fullmatch(phone):
+        candidates["phone"] = phone
+    allowed = False
+    for kind, identity in candidates.items():
+        if kind == "phone" and not SMS_ENABLED:
+            continue
+        result = table.query(
+            KeyConditionExpression=Key("pk").eq(_owner_key(kind, identity)),
+            Limit=1,
+        )
+        allowed |= bool(result.get("Items"))
+    if allowed:
+        return event
+    metadata = (event.get("request") or {}).get("clientMetadata") or {}
+    intent_token = str(metadata.get("verificationIntentToken") or "") if isinstance(metadata, dict) else ""
+    for kind, identity in candidates.items():
+        if kind == "phone" and not SMS_ENABLED:
+            continue
+        if _consume_verification_intent(table, intent_token, kind, identity):
+            return event
+    raise PermissionError("contributor_request_required")
 
 
 def _request_with_history(table, request_id: str) -> dict[str, Any]:
@@ -527,7 +785,7 @@ def _decide(table, request_id: str, body: dict[str, Any], actor: str) -> dict[st
         "message": message or "No additional note was provided.", "shipping": shipping,
         "reimbursementUrl": f"{SITE_URL}/request.html?request={request_id}&token={reimbursement_token}",
     }
-    if subject_key:
+    if subject_key and item.get("email"):
         _send_email(item["email"], _render(templates[subject_key], values), _render(templates[body_key], values), reply_to=ADMIN_EMAIL)
 
     updated = _now()
@@ -662,18 +920,24 @@ def _validate_address(value: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def _require_contributor(table, request_id: str, body: dict[str, Any]) -> dict[str, Any]:
+def _require_contributor(
+    table, request_id: str, body: dict[str, Any], identities: dict[str, str] | None = None
+) -> dict[str, Any]:
     item = _request_item(table, request_id)
-    token = _text(body.get("token"), 200, required=True)
-    if not _valid_reimbursement_token(item, token):
-        raise PermissionError("invalid_or_expired_link")
+    if identities is not None:
+        if not _owns_request(item, identities):
+            raise LookupError("request_not_found")
+    else:
+        token = _text(body.get("token"), 200, required=True)
+        if not _valid_reimbursement_token(item, token):
+            raise PermissionError("invalid_or_expired_link")
     if item.get("status") not in {"approved", "received", "reimbursed", "closed"}:
         raise RuntimeError("request_not_approved")
     return item
 
 
-def _register_tracking(table, request_id: str, body: dict[str, Any]) -> dict[str, Any]:
-    item = _require_contributor(table, request_id, body)
+def _register_tracking(table, request_id: str, body: dict[str, Any], identities: dict[str, str] | None = None) -> dict[str, Any]:
+    item = _require_contributor(table, request_id, body, identities)
     if item.get("labelPurchaseState") in {"purchasing", "purchased"}:
         raise RuntimeError("prepaid_label_already_exists")
     carrier = _text(body.get("carrier"), 30, required=True)
@@ -708,8 +972,8 @@ def _parcel(value: dict[str, Any]) -> dict[str, float]:
     return result
 
 
-def _request_rates(table, request_id: str, body: dict[str, Any]) -> dict[str, Any]:
-    item = _require_contributor(table, request_id, body)
+def _request_rates(table, request_id: str, body: dict[str, Any], identities: dict[str, str] | None = None) -> dict[str, Any]:
+    item = _require_contributor(table, request_id, body, identities)
     if item.get("status") != "approved" or item.get("prepaidLabelAllowed") is not True:
         raise PermissionError("prepaid_label_not_authorized")
     if item.get("labelPurchaseState") in {"purchasing", "purchased"} or item.get("labelUrl") or item.get("labelPurchasedAt"):
@@ -741,7 +1005,7 @@ def _request_rates(table, request_id: str, body: dict[str, Any]) -> dict[str, An
     if not eligible:
         table.update_item(Key={"pk": item["pk"], "sk": "DETAIL"}, UpdateExpression="SET labelPurchaseState = :review, prepaidRates = :rates, prepaidSenderSummary = :sender, prepaidParcel = :parcel, prepaidRequestedAt = :updated, updatedAt = :updated", ExpressionAttributeValues={":review": "review_required", ":rates": safe_rates, ":sender": sender_summary, ":parcel": parcel, ":updated": updated})
         try:
-            _send_email(ADMIN_EMAIL, f"Prepaid label needs review for {request_id}", f"No eligible direct-carrier rate was within the authorized {cap} USD cap. No label was purchased.\n\nReview: {SITE_URL}/admin.html?request={request_id}", reply_to=item["email"])
+            _send_email(ADMIN_EMAIL, f"Prepaid label needs review for {request_id}", f"No eligible direct-carrier rate was within the authorized {cap} USD cap. No label was purchased.\n\nReview: {SITE_URL}/admin.html?request={request_id}", reply_to=item.get("email") or None)
         except ClientError:
             pass
         return {"ok": True, "status": "review_required", "reason": "no_eligible_rate_within_cap"}
@@ -801,7 +1065,8 @@ def _buy_label(table, request_id: str, body: dict[str, Any], actor: str) -> dict
     )
     table.put_item(Item={"pk": item["pk"], "sk": f"EVENT#{updated}#{secrets.token_hex(3)}", "kind": "audit", "action": "prepaid_label_purchased", "actor": actor, "createdAt": updated})
     warning_text = f"\n\nImportant: {billing_warning}" if billing_warning else ""
-    _send_email(item["email"], f"Your prepaid shipping label for {request_id}", f"Hi {item['name']},\n\nYour prepaid {rate['carrier']} {rate['service']} label is ready:\n{label_url}\n\nTracking: {shipment.tracking_code}\n\nAttach the label securely and hand the package to the carrier. Tracking updates stay tied to {request_id}.{warning_text}\n\n— VivintOne Hardware Lab", reply_to=ADMIN_EMAIL)
+    if item.get("email"):
+        _send_email(item["email"], f"Your prepaid shipping label for {request_id}", f"Hi {item['name']},\n\nYour prepaid {rate['carrier']} {rate['service']} label is ready:\n{label_url}\n\nTracking: {shipment.tracking_code}\n\nAttach the label securely and hand the package to the carrier. Tracking updates stay tied to {request_id}.{warning_text}\n\n— VivintOne Hardware Lab", reply_to=ADMIN_EMAIL)
     return {"ok": True, "labelUrl": label_url, "trackingNumber": str(shipment.tracking_code), "trackingUrl": direct_url, "carrier": carrier, "service": str(rate["service"]), "status": "label_purchased"}
 
 
@@ -824,8 +1089,8 @@ def _refund_label(table, request_id: str, body: dict[str, Any], actor: str) -> d
     return _request_with_history(table, request_id)
 
 
-def _refresh_label_url(table, request_id: str, body: dict[str, Any]) -> dict[str, Any]:
-    item = _require_contributor(table, request_id, body)
+def _refresh_label_url(table, request_id: str, body: dict[str, Any], identities: dict[str, str] | None = None) -> dict[str, Any]:
+    item = _require_contributor(table, request_id, body, identities)
     if item.get("labelPurchaseState") != "purchased" or not item.get("labelKey"):
         raise LookupError("label_not_found")
     return {"ok": True, "labelUrl": _label_download_url(request_id, str(item["labelKey"])), "status": "label_purchased"}
@@ -843,7 +1108,8 @@ def _apply_tracking_update(table, item: dict[str, Any], result: dict[str, str]) 
     table.update_item(Key={"pk": item["pk"], "sk": "DETAIL"}, UpdateExpression=expression, ExpressionAttributeValues=values)
     if first_delivery:
         note = " If you requested reimbursement, payment is normally sent within 12 hours after physical receipt is confirmed." if item.get("reimbursementStatus") == "submitted" else ""
-        _send_email(item["email"], f"Carrier delivery update for {item['requestId']}", f"Hi {item['name']},\n\nThe carrier marked your package delivered. It is now awaiting physical receipt confirmation by the VivintOne Hardware Lab.{note}\n\n— VivintOne Hardware Lab", reply_to=ADMIN_EMAIL)
+        if item.get("email"):
+            _send_email(item["email"], f"Carrier delivery update for {item['requestId']}", f"Hi {item['name']},\n\nThe carrier marked your package delivered. It is now awaiting physical receipt confirmation by the VivintOne Hardware Lab.{note}\n\n— VivintOne Hardware Lab", reply_to=ADMIN_EMAIL)
         _send_email(ADMIN_EMAIL, f"Package delivered for {item['requestId']}", f"The carrier reports delivery. Confirm the hardware physically arrived before marking the request Received or releasing reimbursement.\n\nReview: {SITE_URL}/admin.html?request={item['requestId']}")
 
 
@@ -885,12 +1151,8 @@ def _poll_direct_carriers(table) -> dict[str, Any]:
     return {"ok": True, "polled": polled, "updated": updated_count, "failed": failed, "refunded": refunded}
 
 
-def _reimbursement_summary(table, request_id: str, token: str) -> dict[str, Any]:
-    item = _request_item(table, request_id)
-    if not _valid_reimbursement_token(item, token):
-        raise PermissionError("invalid_or_expired_link")
-    if item.get("status") not in {"approved", "received", "reimbursed", "closed"}:
-        raise RuntimeError("request_not_approved")
+def _reimbursement_summary(table, request_id: str, token: str, identities: dict[str, str] | None = None) -> dict[str, Any]:
+    item = _require_contributor(table, request_id, {"token": token}, identities)
     return {
         "ok": True,
         "request": {
@@ -909,8 +1171,8 @@ def _reimbursement_summary(table, request_id: str, token: str) -> dict[str, Any]
     }
 
 
-def _waive_reimbursement(table, request_id: str, body: dict[str, Any]) -> dict[str, Any]:
-    item = _require_contributor(table, request_id, body)
+def _waive_reimbursement(table, request_id: str, body: dict[str, Any], identities: dict[str, str] | None = None) -> dict[str, Any]:
+    item = _require_contributor(table, request_id, body, identities)
     if item.get("reimbursementStatus") == "paid":
         raise RuntimeError("reimbursement_already_paid")
     if item.get("reimbursementStatus") == "not_requested":
@@ -923,11 +1185,8 @@ def _waive_reimbursement(table, request_id: str, body: dict[str, Any]) -> dict[s
     return {"ok": True, "reference": request_id, "status": "not_requested"}
 
 
-def _receipt_upload(table, request_id: str, body: dict[str, Any]) -> dict[str, Any]:
-    item = _request_item(table, request_id)
-    token = _text(body.get("token"), 200, required=True)
-    if not _valid_reimbursement_token(item, token):
-        raise PermissionError("invalid_or_expired_link")
+def _receipt_upload(table, request_id: str, body: dict[str, Any], identities: dict[str, str] | None = None) -> dict[str, Any]:
+    item = _require_contributor(table, request_id, body, identities)
     if item.get("reimbursementStatus") == "paid":
         raise RuntimeError("reimbursement_already_paid")
     if not item.get("trackingNumber"):
@@ -948,21 +1207,27 @@ def _receipt_upload(table, request_id: str, body: dict[str, Any]) -> dict[str, A
         Conditions=[{"Content-Type": content_type}, ["content-length-range", 1, 10 * 1024 * 1024]],
         ExpiresIn=600,
     )
+    if identities is not None:
+        # Portal clients use a request-scoped opaque handle, not the stored DynamoDB key.
+        return {"ok": True, "receiptId": key.rsplit("/", 1)[-1], "upload": upload}
     return {"ok": True, "receiptKey": key, "upload": upload}
 
 
-def _submit_reimbursement(table, request_id: str, body: dict[str, Any]) -> dict[str, Any]:
-    item = _request_item(table, request_id)
-    token = _text(body.get("token"), 200, required=True)
-    if not _valid_reimbursement_token(item, token):
-        raise PermissionError("invalid_or_expired_link")
+def _submit_reimbursement(table, request_id: str, body: dict[str, Any], identities: dict[str, str] | None = None) -> dict[str, Any]:
+    item = _require_contributor(table, request_id, body, identities)
     if item.get("reimbursementStatus") == "paid":
         raise RuntimeError("reimbursement_already_paid")
     if not item.get("trackingNumber"):
         raise RuntimeError("shipping_must_be_started_first")
     if item.get("reimbursementStatus") == "not_requested":
         raise RuntimeError("reimbursement_not_requested")
-    receipt_key = _text(body.get("receiptKey"), 300, required=True)
+    if identities is not None:
+        receipt_id = _text(body.get("receiptId"), 80, required=True)
+        if not re.fullmatch(r"[a-f0-9]{32}\.(?:jpg|png|pdf)", receipt_id):
+            raise ValueError("invalid_receipt")
+        receipt_key = f"receipts/{request_id}/{receipt_id}"
+    else:
+        receipt_key = _text(body.get("receiptKey"), 300, required=True)
     if not receipt_key.startswith(f"receipts/{request_id}/"):
         raise ValueError("invalid_receipt")
     try:
@@ -992,8 +1257,9 @@ def _submit_reimbursement(table, request_id: str, body: dict[str, Any]) -> dict[
     templates = _setting(table, "TEMPLATES", DEFAULT_TEMPLATES)
     values = {"name": item["name"], "reference": request_id, "product": item["productName"]}
     try:
-        _send_email(item["email"], _render(templates["reimbursementSubject"], values), _render(templates["reimbursementBody"], values), reply_to=ADMIN_EMAIL)
-        _send_email(ADMIN_EMAIL, f"Shipping reimbursement submitted for {request_id}", f"A {amount} USD {carrier} shipping reimbursement is ready for review. Payment stays locked until the hardware is marked physically received.\n\nReview: {SITE_URL}/admin.html?request={request_id}", reply_to=item["email"])
+        if item.get("email"):
+            _send_email(item["email"], _render(templates["reimbursementSubject"], values), _render(templates["reimbursementBody"], values), reply_to=ADMIN_EMAIL)
+        _send_email(ADMIN_EMAIL, f"Shipping reimbursement submitted for {request_id}", f"A {amount} USD {carrier} shipping reimbursement is ready for review. Payment stays locked until the hardware is marked physically received.\n\nReview: {SITE_URL}/admin.html?request={request_id}", reply_to=item.get("email") or None)
     except ClientError:
         pass
     return {"ok": True, "reference": request_id, "status": "submitted"}
@@ -1025,7 +1291,8 @@ def _mark_reimbursed(table, request_id: str, body: dict[str, Any], actor: str) -
     )
     table.put_item(Item={"pk": item["pk"], "sk": f"EVENT#{updated}#{secrets.token_hex(3)}", "kind": "audit", "action": "reimbursed", "actor": actor, "createdAt": updated})
     try:
-        _send_email(item["email"], f"Shipping reimbursement sent for {request_id}", f"Hi {item['name']},\n\nYour {item['reimbursementAmount']} USD shipping reimbursement for {item['productName']} has been marked paid through {item['paymentMethod'].title()}.\n\n{note}\n\n— VivintOne Hardware Lab", reply_to=ADMIN_EMAIL)
+        if item.get("email"):
+            _send_email(item["email"], f"Shipping reimbursement sent for {request_id}", f"Hi {item['name']},\n\nYour {item['reimbursementAmount']} USD shipping reimbursement for {item['productName']} has been marked paid through {item['paymentMethod'].title()}.\n\n{note}\n\n— VivintOne Hardware Lab", reply_to=ADMIN_EMAIL)
     except ClientError:
         pass
     return _request_with_history(table, request_id)
@@ -1042,6 +1309,8 @@ def _handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
             return _response(200, {"ok": True, "models": _catalog(table)})
         if route == "GET /api/public-settings":
             return _response(200, {"ok": True, **_setting(table, "PUBLIC", DEFAULT_PUBLIC_SETTINGS)})
+        if route == "POST /api/verification-intents":
+            return _response(201, _create_verification_intent(table, _body(event)))
         if route == "POST /api/requests":
             return _response(201, _create_request(table, _body(event)))
         if route == "GET /api/reimbursements/{requestId}":
@@ -1059,6 +1328,51 @@ def _handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
             return _response(200, _request_rates(table, params["requestId"], _body(event)))
         if route == "POST /api/shipments/{requestId}/label-url":
             return _response(200, _refresh_label_url(table, params["requestId"], _body(event)))
+        if route.startswith("GET /api/portal/") or route.startswith("POST /api/portal/"):
+            identities = _contributor_claims(event)
+            if route == "GET /api/portal/requests":
+                return _response(200, {"ok": True, "requests": _portal_requests(table, identities)})
+            if route == "POST /api/portal/requests":
+                body = _body(event)
+                identity_type = _text(body.get("loginIdentityType"), 10, required=True)
+                if identity_type == "phone" and not SMS_ENABLED:
+                    raise RuntimeError("phone_verification_unavailable")
+                if identity_type not in {"email", "phone"}:
+                    raise ValueError("invalid_identity_type")
+                verified_identity = identities.get(identity_type)
+                if not verified_identity:
+                    raise PermissionError("verified_identity_required")
+                supplied_identity = body.get(identity_type)
+                if supplied_identity:
+                    normalized_supplied = (
+                        _normalize_email(supplied_identity) if identity_type == "email"
+                        else _normalize_phone(supplied_identity)
+                    )
+                    if not secrets.compare_digest(normalized_supplied, verified_identity):
+                        raise PermissionError("verified_identity_mismatch")
+                body[identity_type] = verified_identity
+                return _response(201, _create_request(
+                    table, body, owner_identities={identity_type: verified_identity},
+                    require_email=identity_type == "email", actor="contributor",
+                ))
+            request_id = params.get("requestId", "")
+            if route == "GET /api/portal/requests/{requestId}":
+                item = _portal_owned_request(table, request_id, identities)
+                history = _portal_request_history(table, request_id)
+                return _response(200, {"ok": True, "request": _portal_request(item), "history": history})
+            if route == "POST /api/portal/requests/{requestId}/tracking":
+                return _response(200, _register_tracking(table, request_id, _body(event), identities))
+            if route == "POST /api/portal/requests/{requestId}/rates":
+                return _response(200, _request_rates(table, request_id, _body(event), identities))
+            if route == "POST /api/portal/requests/{requestId}/label-url":
+                return _response(200, _refresh_label_url(table, request_id, _body(event), identities))
+            if route == "POST /api/portal/requests/{requestId}/reimbursement/upload":
+                return _response(200, _receipt_upload(table, request_id, _body(event), identities))
+            if route == "POST /api/portal/requests/{requestId}/reimbursement":
+                return _response(201, _submit_reimbursement(table, request_id, _body(event), identities))
+            if route == "POST /api/portal/requests/{requestId}/reimbursement/waive":
+                return _response(200, _waive_reimbursement(table, request_id, _body(event), identities))
+            return _response(404, {"ok": False, "error": "not_found"})
         claims = _admin_claims(event)
         actor = claims.get("username") or claims.get("cognito:username") or "admin"
         if route == "GET /api/admin/requests":
@@ -1118,3 +1432,8 @@ if logger and metrics:
     )
 else:
     handler = _handler
+
+
+def presignup_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
+    """Cognito PreSignUp trigger: admit only identities with an existing request."""
+    return _pre_signup(_table(), event)

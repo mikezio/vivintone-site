@@ -16,12 +16,49 @@ Parameters:
   AdminUsername:
     Type: String
     Default: admin
+  ContributorSmsEnabled:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Enable contributor SMS OTP only after the AWS account has production SMS access and an approved origination identity
   ArtifactBucket:
     Type: String
   ArtifactKey:
     Type: String
 
+Conditions:
+  ContributorSmsEnabledCondition: !Equals [!Ref ContributorSmsEnabled, 'true']
+
 Resources:
+  MonthlyGrossCostBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: !Sub '${AWS::StackName}-monthly-gross-cost'
+        BudgetLimit: { Amount: 25, Unit: USD }
+        BudgetType: COST
+        CostTypes:
+          IncludeCredit: false
+          IncludeRefund: false
+        TimeUnit: MONTHLY
+      NotificationsWithSubscribers:
+        - Notification: { ComparisonOperator: GREATER_THAN, NotificationType: ACTUAL, Threshold: 50, ThresholdType: PERCENTAGE }
+          Subscribers: [{ Address: !Ref AdminEmail, SubscriptionType: EMAIL }]
+        - Notification: { ComparisonOperator: GREATER_THAN, NotificationType: ACTUAL, Threshold: 80, ThresholdType: PERCENTAGE }
+          Subscribers: [{ Address: !Ref AdminEmail, SubscriptionType: EMAIL }]
+        - Notification: { ComparisonOperator: GREATER_THAN, NotificationType: ACTUAL, Threshold: 100, ThresholdType: PERCENTAGE }
+          Subscribers: [{ Address: !Ref AdminEmail, SubscriptionType: EMAIL }]
+        - Notification: { ComparisonOperator: GREATER_THAN, NotificationType: FORECASTED, Threshold: 100, ThresholdType: PERCENTAGE }
+          Subscribers: [{ Address: !Ref AdminEmail, SubscriptionType: EMAIL }]
+
+  OperationsAlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: VivintOne operations alarms
+      Subscription:
+        - Endpoint: !Ref AdminEmail
+          Protocol: email
+
   SiteBucket:
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain
@@ -222,6 +259,166 @@ Resources:
         - { Name: email, Value: !Ref AdminEmail }
         - { Name: email_verified, Value: 'true' }
 
+  ContributorSmsRole:
+    Type: AWS::IAM::Role
+    Condition: ContributorSmsEnabledCondition
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: cognito-idp.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                'sts:ExternalId': !Sub 'vivintone-contributors-${AWS::AccountId}-${AWS::Region}'
+                'aws:SourceAccount': !Ref AWS::AccountId
+              ArnLike:
+                'aws:SourceArn': !Sub 'arn:${AWS::Partition}:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/*'
+      Policies:
+        - PolicyName: vivintone-contributor-sms
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: '*'
+
+  ContributorPreSignUpRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: vivintone-contributor-presignup
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:DeleteItem, dynamodb:Query]
+                Resource: !GetAtt HardwareTable.Arn
+
+  ContributorPreSignUpFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: vivintone-contributor-presignup
+      Runtime: python3.13
+      Architectures: [arm64]
+      Handler: handler.presignup_handler
+      Role: !GetAtt ContributorPreSignUpRole.Arn
+      MemorySize: 128
+      Timeout: 5
+      ReservedConcurrentExecutions: 5
+      Code: { S3Bucket: !Ref ArtifactBucket, S3Key: !Ref ArtifactKey }
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref HardwareTable
+          CONTRIBUTOR_SMS_ENABLED: !Ref ContributorSmsEnabled
+          POWERTOOLS_LOG_LEVEL: INFO
+
+  ContributorPreSignUpFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${ContributorPreSignUpFunction}'
+      RetentionInDays: 30
+
+  ContributorUserPool:
+    Type: AWS::Cognito::UserPool
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    DependsOn: EmailIdentity
+    Properties:
+      UserPoolName: vivintone-hardware-contributors
+      UserPoolTier: ESSENTIALS
+      DeletionProtection: ACTIVE
+      UsernameConfiguration: { CaseSensitive: false }
+      UsernameAttributes: [email, phone_number]
+      AutoVerifiedAttributes: [email, phone_number]
+      MfaConfiguration: 'OFF'
+      Policies:
+        SignInPolicy:
+          AllowedFirstAuthFactors: !If
+            - ContributorSmsEnabledCondition
+            - [EMAIL_OTP, SMS_OTP]
+            - [EMAIL_OTP]
+      EmailConfiguration:
+        EmailSendingAccount: DEVELOPER
+        From: !Sub 'VivintOne Contributor Portal <portal@${SiteSubdomain}.${RootDomain}>'
+        ReplyToEmailAddress: !Sub 'hardware@${SiteSubdomain}.${RootDomain}'
+        SourceArn: !Sub 'arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/${SiteSubdomain}.${RootDomain}'
+      EmailAuthenticationMessage: 'Your VivintOne sign-in code is {####}.'
+      EmailAuthenticationSubject: Your VivintOne sign-in code
+      SmsAuthenticationMessage: '{####} is your VivintOne sign-in code.'
+      SmsConfiguration: !If
+        - ContributorSmsEnabledCondition
+        - ExternalId: !Sub 'vivintone-contributors-${AWS::AccountId}-${AWS::Region}'
+          SnsCallerArn: !GetAtt ContributorSmsRole.Arn
+          SnsRegion: !Ref AWS::Region
+        - !Ref AWS::NoValue
+      LambdaConfig:
+        PreSignUp: !GetAtt ContributorPreSignUpFunction.Arn
+
+  ContributorPreSignUpPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ContributorPreSignUpFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !GetAtt ContributorUserPool.Arn
+
+  ContributorUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: vivintone-contributor-web
+      UserPoolId: !Ref ContributorUserPool
+      GenerateSecret: false
+      PreventUserExistenceErrors: ENABLED
+      EnableTokenRevocation: true
+      ExplicitAuthFlows: [ALLOW_USER_AUTH, ALLOW_REFRESH_TOKEN_AUTH]
+      AccessTokenValidity: 1
+      IdTokenValidity: 1
+      RefreshTokenValidity: 7
+      TokenValidityUnits: { AccessToken: hours, IdToken: hours, RefreshToken: days }
+
+  ContributorAuthWebAcl:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: vivintone-contributor-auth
+      Scope: REGIONAL
+      DefaultAction: { Allow: {} }
+      VisibilityConfig:
+        CloudWatchMetricsEnabled: true
+        MetricName: vivintone-contributor-auth
+        SampledRequestsEnabled: false
+      Rules:
+        - Name: ContributorAuthIpRateLimit
+          Priority: 0
+          Action: { Block: {} }
+          Statement:
+            RateBasedStatement:
+              AggregateKeyType: IP
+              EvaluationWindowSec: 300
+              Limit: 30
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: contributor-auth-ip-rate
+            SampledRequestsEnabled: false
+
+  ContributorAuthWebAclAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    Properties:
+      ResourceArn: !GetAtt ContributorUserPool.Arn
+      WebACLArn: !GetAtt ContributorAuthWebAcl.Arn
+
   Api:
     Type: AWS::ApiGatewayV2::Api
     Properties:
@@ -260,6 +457,17 @@ Resources:
       JwtConfiguration:
         Audience: [!Ref AdminUserPoolClient]
         Issuer: !Sub 'https://cognito-idp.${AWS::Region}.amazonaws.com/${AdminUserPool}'
+
+  ContributorAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref Api
+      AuthorizerType: JWT
+      IdentitySource: ['$request.header.Authorization']
+      Name: cognito-contributor
+      JwtConfiguration:
+        Audience: [!Ref ContributorUserPoolClient]
+        Issuer: !Sub 'https://cognito-idp.${AWS::Region}.amazonaws.com/${ContributorUserPool}'
 
   ApiRole:
     Type: AWS::IAM::Role
@@ -338,6 +546,7 @@ Resources:
       Environment:
         Variables:
           TABLE_NAME: !Ref HardwareTable
+          CONTRIBUTOR_SMS_ENABLED: !Ref ContributorSmsEnabled
           SHIPPING_SECRET_ARN: !Ref ShippingInstructions
           RECEIPTS_BUCKET: !Ref ReceiptsBucket
           FROM_EMAIL: !Sub 'hardware@${SiteSubdomain}.${RootDomain}'
@@ -413,6 +622,9 @@ Resources:
   CreateRequestRoute:
     Type: AWS::ApiGatewayV2::Route
     Properties: { ApiId: !Ref Api, RouteKey: 'POST /api/requests', Target: !Sub 'integrations/${ApiIntegration}' }
+  VerificationIntentRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties: { ApiId: !Ref Api, RouteKey: 'POST /api/verification-intents', Target: !Sub 'integrations/${ApiIntegration}' }
   ReimbursementRoute:
     Type: AWS::ApiGatewayV2::Route
     Properties: { ApiId: !Ref Api, RouteKey: 'GET /api/reimbursements/{requestId}', Target: !Sub 'integrations/${ApiIntegration}' }
@@ -434,6 +646,33 @@ Resources:
   PrepaidLabelUrlRoute:
     Type: AWS::ApiGatewayV2::Route
     Properties: { ApiId: !Ref Api, RouteKey: 'POST /api/shipments/{requestId}/label-url', Target: !Sub 'integrations/${ApiIntegration}' }
+  PortalRequestsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties: { ApiId: !Ref Api, RouteKey: 'GET /api/portal/requests', Target: !Sub 'integrations/${ApiIntegration}', AuthorizationType: JWT, AuthorizerId: !Ref ContributorAuthorizer }
+  PortalCreateRequestRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties: { ApiId: !Ref Api, RouteKey: 'POST /api/portal/requests', Target: !Sub 'integrations/${ApiIntegration}', AuthorizationType: JWT, AuthorizerId: !Ref ContributorAuthorizer }
+  PortalRequestRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties: { ApiId: !Ref Api, RouteKey: 'GET /api/portal/requests/{requestId}', Target: !Sub 'integrations/${ApiIntegration}', AuthorizationType: JWT, AuthorizerId: !Ref ContributorAuthorizer }
+  PortalTrackingRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties: { ApiId: !Ref Api, RouteKey: 'POST /api/portal/requests/{requestId}/tracking', Target: !Sub 'integrations/${ApiIntegration}', AuthorizationType: JWT, AuthorizerId: !Ref ContributorAuthorizer }
+  PortalRatesRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties: { ApiId: !Ref Api, RouteKey: 'POST /api/portal/requests/{requestId}/rates', Target: !Sub 'integrations/${ApiIntegration}', AuthorizationType: JWT, AuthorizerId: !Ref ContributorAuthorizer }
+  PortalLabelUrlRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties: { ApiId: !Ref Api, RouteKey: 'POST /api/portal/requests/{requestId}/label-url', Target: !Sub 'integrations/${ApiIntegration}', AuthorizationType: JWT, AuthorizerId: !Ref ContributorAuthorizer }
+  PortalReimbursementUploadRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties: { ApiId: !Ref Api, RouteKey: 'POST /api/portal/requests/{requestId}/reimbursement/upload', Target: !Sub 'integrations/${ApiIntegration}', AuthorizationType: JWT, AuthorizerId: !Ref ContributorAuthorizer }
+  PortalReimbursementRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties: { ApiId: !Ref Api, RouteKey: 'POST /api/portal/requests/{requestId}/reimbursement', Target: !Sub 'integrations/${ApiIntegration}', AuthorizationType: JWT, AuthorizerId: !Ref ContributorAuthorizer }
+  PortalReimbursementWaiveRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties: { ApiId: !Ref Api, RouteKey: 'POST /api/portal/requests/{requestId}/reimbursement/waive', Target: !Sub 'integrations/${ApiIntegration}', AuthorizationType: JWT, AuthorizerId: !Ref ContributorAuthorizer }
   AdminRequestsRoute:
     Type: AWS::ApiGatewayV2::Route
     Properties: { ApiId: !Ref Api, RouteKey: 'GET /api/admin/requests', Target: !Sub 'integrations/${ApiIntegration}', AuthorizationType: JWT, AuthorizerId: !Ref AdminAuthorizer, AuthorizationScopes: [intake/admin] }
@@ -523,6 +762,102 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt DirectCarrierPollSchedule.Arn
 
+  ApiFunctionErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: VivintOne API Lambda returned one or more errors in five minutes
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{ Name: FunctionName, Value: !Ref ApiFunction }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref OperationsAlarmTopic]
+
+  ApiFunctionThrottlesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: VivintOne API Lambda was throttled in five minutes
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      Dimensions: [{ Name: FunctionName, Value: !Ref ApiFunction }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref OperationsAlarmTopic]
+
+  ContributorPreSignUpErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Contributor PreSignUp Lambda returned one or more errors in five minutes
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{ Name: FunctionName, Value: !Ref ContributorPreSignUpFunction }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref OperationsAlarmTopic]
+
+  ContributorPreSignUpThrottlesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Contributor PreSignUp Lambda was throttled in five minutes
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      Dimensions: [{ Name: FunctionName, Value: !Ref ContributorPreSignUpFunction }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref OperationsAlarmTopic]
+
+  DirectCarrierPollErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Scheduled direct-carrier polling returned one or more errors
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{ Name: FunctionName, Value: !Ref DirectCarrierPollFunction }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref OperationsAlarmTopic]
+
+  DirectCarrierPollDeadLetterAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Scheduled direct-carrier polling has a message waiting in its dead-letter queue
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions: [{ Name: QueueName, Value: !GetAtt DirectCarrierPollDeadLetterQueue.QueueName }]
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref OperationsAlarmTopic]
+
   OriginAccessControl:
     Type: AWS::CloudFront::OriginAccessControl
     Properties:
@@ -589,6 +924,21 @@ Resources:
                   SearchString: /api/requests
                   TextTransformations: [{ Priority: 0, Type: NONE }]
           VisibilityConfig: { CloudWatchMetricsEnabled: true, MetricName: submission-rate, SampledRequestsEnabled: false }
+        - Name: VerificationIntentRateLimit
+          Priority: 3
+          Action: { Block: {} }
+          Statement:
+            RateBasedStatement:
+              AggregateKeyType: IP
+              EvaluationWindowSec: 300
+              Limit: 10
+              ScopeDownStatement:
+                ByteMatchStatement:
+                  FieldToMatch: { UriPath: {} }
+                  PositionalConstraint: EXACTLY
+                  SearchString: /api/verification-intents
+                  TextTransformations: [{ Priority: 0, Type: NONE }]
+          VisibilityConfig: { CloudWatchMetricsEnabled: true, MetricName: verification-intent-rate, SampledRequestsEnabled: false }
 
   Distribution:
     Type: AWS::CloudFront::Distribution
@@ -680,6 +1030,10 @@ Outputs:
   CognitoAuthority: { Value: !Sub 'https://cognito-idp.${AWS::Region}.amazonaws.com/${AdminUserPool}' }
   CognitoClientId: { Value: !Ref AdminUserPoolClient }
   CognitoLoginDomain: { Value: !Sub 'https://${AdminUserPoolDomain}.auth.${AWS::Region}.amazoncognito.com' }
+  ContributorUserPoolId: { Value: !Ref ContributorUserPool }
+  ContributorUserPoolClientId: { Value: !Ref ContributorUserPoolClient }
+  ContributorCognitoAuthority: { Value: !Sub 'https://cognito-idp.${AWS::Region}.amazonaws.com/${ContributorUserPool}' }
+  ContributorSmsEnabled: { Value: !If [ContributorSmsEnabledCondition, 'true', 'false'] }
   ShippingSecretArn: { Value: !Ref ShippingInstructions }
   ReceiptsBucketName: { Value: !Ref ReceiptsBucket }
   DirectCarrierPollDeadLetterQueueUrl: { Value: !Ref DirectCarrierPollDeadLetterQueue }
