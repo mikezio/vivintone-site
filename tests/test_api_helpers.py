@@ -31,6 +31,19 @@ class FakeTable:
         return {}
 
 
+class FakeSettingsTable:
+    def __init__(self, items):
+        self.items = {(item["pk"], item["sk"]): dict(item) for item in items}
+
+    def get_item(self, Key):
+        item = self.items.get((Key["pk"], Key["sk"]))
+        return {"Item": dict(item)} if item else {}
+
+    def put_item(self, Item, **_kwargs):
+        self.items[(Item["pk"], Item["sk"])] = dict(Item)
+        return {}
+
+
 class SubmissionSchemaTests(unittest.TestCase):
     def test_valid_submission_is_normalized(self):
         result = handler.validate_submission(dict(VALID_SUBMISSION))
@@ -64,6 +77,28 @@ class SubmissionSchemaTests(unittest.TestCase):
 
 
 class CatalogSchemaTests(unittest.TestCase):
+    def test_retired_smart_hub_placeholder_is_migrated_without_overwriting_other_rows(self):
+        table = FakeSettingsTable([
+            {
+                "pk": "CATALOG", "sk": "MODEL#panel-smart-hub-pro-gen2", "kind": "catalog",
+                "id": "panel-smart-hub-pro-gen2", "position": 7,
+                "productName": "Old name", "modelNumber": "Model identifier being confirmed",
+            },
+            {
+                "pk": "CATALOG", "sk": "MODEL#camera-dbc350", "kind": "catalog",
+                "id": "camera-dbc350", "position": 8,
+                "productName": "Customized camera", "modelNumber": "CUSTOM",
+            },
+        ])
+        handler._migrate_catalog_placeholders(table)
+        panel = table.items[("CATALOG", "MODEL#panel-smart-hub-pro-gen2")]
+        camera = table.items[("CATALOG", "MODEL#camera-dbc350")]
+        self.assertEqual(panel["productName"], "Vivint Smart Hub Pro 2")
+        self.assertEqual(panel["modelNumber"], "VS-SHP200-001 / VS-SHP200-002")
+        self.assertEqual(panel["generation"], "Gen 2 / Revision B")
+        self.assertEqual(panel["position"], 7)
+        self.assertEqual(camera["productName"], "Customized camera")
+
     def test_seed_catalog_has_unique_schema_conforming_entries(self):
         models = json.loads(Path("functions/api/catalog_seed.json").read_text())
         required_strings = {"id", "category", "productName", "modelNumber", "status", "tested", "needed"}
@@ -107,6 +142,24 @@ class CatalogSchemaTests(unittest.TestCase):
 
 
 class ApiHelperTests(unittest.TestCase):
+    def test_legacy_hardware_lab_templates_are_migrated_without_replacing_custom_copy(self):
+        table = FakeSettingsTable([
+            {"pk": "SETTINGS", "sk": "PUBLIC", "kind": "settings", "title": "Custom title"},
+            {
+                "pk": "SETTINGS", "sk": "TEMPLATES", "kind": "settings",
+                "receivedBody": "The VivintOne Hardware Lab will review this.",
+                "approvedBody": "My already customized approval message.",
+            },
+        ])
+        handler._migrate_legacy_settings(table)
+        public = table.items[("SETTINGS", "PUBLIC")]
+        templates = table.items[("SETTINGS", "TEMPLATES")]
+        self.assertEqual(public["title"], "Custom title")
+        self.assertEqual(public["schemaVersion"], handler.SETTINGS_SCHEMA_VERSION)
+        self.assertNotIn("Hardware Lab", templates["receivedBody"])
+        self.assertEqual(templates["approvedBody"], "My already customized approval message.")
+        self.assertEqual(templates["schemaVersion"], handler.SETTINGS_SCHEMA_VERSION)
+
     def test_json_body_requires_an_object(self):
         for raw in ("not json", "[]", '"text"'):
             with self.subTest(raw=raw):

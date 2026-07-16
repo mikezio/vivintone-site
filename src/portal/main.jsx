@@ -46,7 +46,7 @@ function SignIn({ config, onAuthenticated, message }) {
   const send = async event => {
     event.preventDefault(); setBusy(true); setError('');
     try {
-      if (!config.contributorSmsEnabled && !identifier.trim().includes('@')) throw new Error('Mobile code sign-in is pending carrier and AWS activation. Use the email address from your request for now.');
+      if (!config.contributorSmsEnabled && !identifier.trim().includes('@')) throw new Error('Use the verified email address from your request.');
       const value = await beginSignIn(config, identifier); value.authenticated ? onAuthenticated(value.authenticated) : (setAttempt(value), setCode(''), setTimeout(() => codeRef.current?.focus(), 0));
     }
     catch (err) { setError(err.message); }
@@ -60,7 +60,7 @@ function SignIn({ config, onAuthenticated, message }) {
   };
   const resend = async () => { setBusy(true); setError(''); try { setAttempt(await resendSignInCode(config, attempt)); setCode(''); } catch (err) { setError(err.message); } finally { setBusy(false); } };
   return <main className="auth-layout" id="main">
-    <section className="auth-intro"><p className="eyebrow">Contributor workspace</p><h1>Your hardware journey, in one place.</h1><p>Follow every request, arrange approved shipping, and manage reimbursement without a password or private email link.</p><div className="privacy-note"><strong>This is not the admin console.</strong><span>You can see only requests associated with your verified email address or phone number.</span></div></section>
+    <section className="auth-intro"><p className="eyebrow">My requests</p><h1>Check a hardware request.</h1><p>Use the same verified email address or phone number from your submission to view status, approved shipping, tracking, receipts, and reimbursement.</p></section>
     <section className="auth-card" aria-labelledby="signin-title">
       <span className="step-label">{attempt ? 'Step 2 of 2' : 'Step 1 of 2'}</span>
       <h2 id="signin-title">{attempt ? 'Enter your 6-digit code' : 'Contributor sign in'}</h2>
@@ -70,7 +70,6 @@ function SignIn({ config, onAuthenticated, message }) {
         <Field label="Email or mobile number" hint="For mobile, include the country code (for example, +1).">
           <input autoFocus autoComplete="username" inputMode="email" value={identifier} onChange={event => setIdentifier(event.target.value)} placeholder="you@example.com or +1 555 123 4567" required />
         </Field>
-        {!config.contributorSmsEnabled && <div className="channel-note"><strong>Email available now</strong><span>Phone codes are pending carrier and AWS activation.</span></div>}
         {error && <Notice type="error">{error}</Notice>}
         <button className="primary wide" disabled={busy}>{busy ? 'Sending securely…' : 'Send sign-in code'}</button>
         <p className="security-copy">If the address or number can receive a code, it will arrive shortly. For privacy, sign-in messages never confirm whether an account exists.</p>
@@ -101,7 +100,7 @@ function Dashboard({ session, config, onSession, onExpired }) {
   useEffect(() => { load(); }, []);
   if (selected) return <main className="workspace" id="main"><button className="back-link" onClick={() => { setSelected(null); load(); }}>← All requests</button>{selected.loading ? <DetailSkeleton /> : <RequestDetail request={selected} api={api} reload={() => open(selected)} />}</main>;
   return <main className="workspace" id="main">
-    <div className="dashboard-head"><div><p className="eyebrow">Contributor workspace</p><h1>My hardware requests</h1><p>Everything associated with this verified contact method appears here.</p></div><div className="session-pill"><span className="session-dot" />Secure session · {sessionMinutes(session)} min</div></div>
+    <div className="dashboard-head"><div><p className="eyebrow">VivintOne</p><h1>My hardware requests</h1><p>Requests submitted with this verified contact appear here.</p></div><div className="session-pill"><span className="session-dot" />Signed in · {sessionMinutes(session)} min</div></div>
     {error && <Notice type="error" action={<button onClick={load}>Try again</button>}>{error}</Notice>}
     {loading ? <RequestSkeleton /> : requests.length ? <div className="request-grid">{requests.map(request => <RequestCard key={request.requestId || request.id} request={request} onClick={() => open(request)} />)}</div> : <EmptyState />}
   </main>;
@@ -123,7 +122,7 @@ function RequestDetail({ request, api, reload }) {
   return <>
     <header className="detail-head"><div><p className="eyebrow">{id}</p><h1>{request.productName || 'Hardware contribution'}</h1><p>{request.modelNumber || 'Model details pending'}{request.quantity > 1 ? ` · Quantity ${request.quantity}` : ''}</p></div><span className={`status status-${request.status}`}>{display(request.status)}</span></header>
     {notice && <Notice type={notice.type}>{notice.message}</Notice>}
-    <div className="detail-grid"><Timeline request={request} /><section className="detail-card facts"><h2>Request details</h2><dl><div><dt>Status</dt><dd>{display(request.status)}</dd></div><div><dt>Submitted</dt><dd>{date(request.createdAt) || '—'}</dd></div><div><dt>Offer</dt><dd>{display(request.offerType)}</dd></div><div><dt>Last update</dt><dd>{date(request.updatedAt) || '—'}</dd></div></dl>{request.decisionMessage && <div className="maintainer-note"><strong>Hardware Lab note</strong><p>{request.decisionMessage}</p></div>}</section></div>
+    <div className="detail-grid"><Timeline request={request} /><section className="detail-card facts"><h2>Request details</h2><dl><div><dt>Status</dt><dd>{display(request.status)}</dd></div><div><dt>Submitted</dt><dd>{date(request.createdAt) || 'Not available'}</dd></div><div><dt>Offer</dt><dd>{display(request.offerType)}</dd></div><div><dt>Last update</dt><dd>{date(request.updatedAt) || 'Not available'}</dd></div></dl>{request.decisionMessage && <div className="maintainer-note"><strong>Note from Mike</strong><p>{request.decisionMessage}</p></div>}</section></div>
     {(shippingActionsVisible || shippingVisible) && <section className="detail-card shipping"><p className="eyebrow">Approved shipping</p><h2>{shippingStarted ? 'Shipping and reimbursement' : 'Choose how to ship'}</h2>{shippingActionsVisible && <><p>Choose one route. Do not send hardware until this request is approved and these options appear.</p><div className="choice-grid"><button disabled={!request.prepaidLabelAllowed} onClick={() => setMode('prepaid')}><span className="choice-icon">↗</span><strong>Use a prepaid label</strong><span>{request.prepaidLabelAllowed ? 'Enter the packed box and return address. An eligible carrier label is created within the approved safeguards.' : 'A prepaid label is not offered for this request.'}</span></button><button onClick={() => setMode('self')}><span className="choice-icon">⌁</span><strong>Ship it myself</strong><span>Buy your own postage, register tracking, then request reimbursement or waive it.</span></button></div></>}
       {shippingVisible && <ShipmentSummary request={request} api={api} fail={fail} />}
     </section>}
@@ -139,7 +138,7 @@ function Timeline({ request }) {
   if (events?.length) return <section className="detail-card"><h2>Timeline</h2><ol className="timeline">{events.map((event, index) => <li className="done" key={`${event.createdAt}-${index}`}><span /><div><strong>{event.title || display(event.action || event.status)}</strong>{event.detail && <p>{event.detail}</p>}<time>{date(event.createdAt)}</time></div></li>)}</ol></section>;
   return <section className="detail-card"><h2>Timeline</h2><ol className="timeline">
     <TimelineItem done title="Request received" time={request.createdAt} />
-    <TimelineItem done={request.status !== 'submitted'} active={['reviewing','info_requested','on_hold'].includes(request.status)} title={request.status === 'info_requested' ? 'Information requested' : 'Hardware Lab review'} time={request.reviewedAt} />
+    <TimelineItem done={request.status !== 'submitted'} active={['reviewing','info_requested','on_hold'].includes(request.status)} title={request.status === 'info_requested' ? 'Information requested' : 'Review by Mike'} time={request.reviewedAt} />
     <TimelineItem done={['approved','received','reimbursed','closed'].includes(request.status)} active={request.status === 'approved'} title={request.status === 'declined' ? 'Review complete' : 'Approved to ship'} time={request.decidedAt} />
     <TimelineItem done={request.carrierStatus === 'delivered' || received} active={Boolean(request.trackingNumber) && !received} title={request.trackingNumber ? display(request.carrierStatus) : 'Shipping'} time={request.trackingSubmittedAt || request.labelPurchasedAt} />
     <TimelineItem done={received} active={request.status === 'received'} title="Hardware received" time={request.receivedAt} />
@@ -173,7 +172,7 @@ function ReimbursementForm({ id, carrier, api, done, fail }) {
   return <form className="detail-card action-form" onSubmit={submit}><FormHeading title="Shipping reimbursement" copy="Reimbursement is optional. Upload the carrier receipt and exact amount paid, or waive reimbursement."/><div className="form-grid"><Field className="full" label="Carrier receipt" hint="JPEG, PNG, or PDF; 10 MB maximum."><input type="file" accept="image/jpeg,image/png,application/pdf" required onChange={event=>setReceipt(event.target.files[0])}/></Field><Field label="Amount paid (USD)"><input type="number" min="0.01" max="500" step="0.01" required value={amount} onChange={event=>setAmount(event.target.value)}/></Field><Field label="Repayment method"><select required value={method} onChange={event=>setMethod(event.target.value)}><option value="">Choose</option><option value="venmo">Venmo</option><option value="zelle">Zelle</option><option value="paypal">PayPal</option></select></Field><Field className="full" label="Payment username, email, or phone" hint="Used only to complete this reimbursement."><input required value={destination} onChange={event=>setDestination(event.target.value)}/></Field></div><div className="split-actions"><button type="button" className="secondary-button" disabled={busy} onClick={waive}>No reimbursement needed</button><button className="primary" disabled={busy}>{busy?'Uploading securely…':'Submit reimbursement'}</button></div></form>;
 }
 
-function Shell({ children, session, logout }) { return <><a className="skip" href="#main">Skip to content</a><header className="portal-nav"><a className="brand" href="/">Vivint<span>One</span> / Hardware Lab</a><div className="portal-mark"><span>Contributor portal</span>{session && <button onClick={logout}>Sign out</button>}</div></header>{children}<footer className="portal-footer"><span>VivintOne by Mike Ziolkowski</span><span>Independent community project; not affiliated with Vivint.</span></footer></>; }
+function Shell({ children, session, logout }) { return <><a className="skip" href="#main">Skip to content</a><header className="portal-nav"><a className="brand" href="/">Vivint<span>One</span></a><div className="portal-mark"><span>My requests</span>{session && <button onClick={logout}>Sign out</button>}</div></header>{children}<footer className="portal-footer"><span>VivintOne by Mike Ziolkowski</span><span>Vivint has not created, sponsored, endorsed, or contributed to VivintOne.</span></footer></>; }
 function Field({ label,hint,className='',children }) { return <label className={`field ${className}`}><span>{label}</span>{children}{hint && <small>{hint}</small>}</label>; }
 function FormHeading({ title,copy,onClose }) { return <div className="form-heading"><div><h2>{title}</h2><p>{copy}</p></div>{onClose&&<button type="button" onClick={onClose} aria-label="Close form">×</button>}</div>; }
 function Notice({ type,children,action }) { return <div className={`notice ${type}`} role={type==='error'?'alert':'status'}><span>{children}</span>{action}</div>; }

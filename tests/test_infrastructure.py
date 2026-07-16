@@ -213,6 +213,23 @@ class InfrastructureContractTests(unittest.TestCase):
         self.assertIn("CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad", TEMPLATE)
         self.assertNotIn("413f1608-43d4-4c27-9936-63d7e8ef1e85", TEMPLATE)
 
+    def test_cloudfront_clean_routes_preserve_api_behavior(self):
+        router = TEMPLATE[TEMPLATE.index("  SiteRouter:"):TEMPLATE.index("  Distribution:")]
+        self.assertIn("Type: AWS::CloudFront::Function", router)
+        self.assertIn("AutoPublish: true", router)
+        self.assertIn("Runtime: cloudfront-js-2.0", router)
+        for route in ("/compatibility", "/architecture", "/updates", "/hardware"):
+            self.assertIn(f"'{route}'", router)
+        self.assertIn("request.uri = '/index.html'", router)
+        self.assertIn("request.uri = '/portal.html'", router)
+        self.assertNotIn("/api/", router)
+
+        default_behavior = TEMPLATE[
+            TEMPLATE.index("        DefaultCacheBehavior:"):TEMPLATE.index("        CacheBehaviors:")
+        ]
+        self.assertIn("EventType: viewer-request", default_behavior)
+        self.assertIn("FunctionARN: !GetAtt SiteRouter.FunctionARN", default_behavior)
+
     def test_cloudformation_exposes_every_handler_route(self):
         handler_routes = {
             route

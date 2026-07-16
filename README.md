@@ -75,7 +75,7 @@ are removed after payment while the amount, method, date, and audit event remain
 
 ## Repository layout
 
-- `public/` — public hardware lab and authenticated admin application
+- `public/` — public project site and authenticated admin application
 - `functions/api/` — Lambda API and initial model catalog
 - `infra/template.yaml` — complete CloudFormation stack
 - `scripts/deploy.sh` — package, deploy, configure, upload, and invalidate

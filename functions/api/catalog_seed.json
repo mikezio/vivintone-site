@@ -2,13 +2,13 @@
   {
     "id": "panel-smart-hub-pro-gen2",
     "category": "Panel",
-    "productName": "Vivint Smart Hub Pro (Gen 2)",
-    "modelNumber": "Model identifier being confirmed",
-    "generation": "Gen 2",
+    "productName": "Vivint Smart Hub Pro 2",
+    "modelNumber": "VS-SHP200-001 / VS-SHP200-002",
+    "generation": "Gen 2 / Revision B",
     "status": "verified_layers",
     "hardwareWanted": false,
     "tested": "Panel-local inventory, HTTPS/SSE security and sensor events, and isolated development access",
-    "needed": "Additional firmware and hardware revisions"
+    "needed": "Additional firmware coverage and regression testing across hardware revisions"
   },
   {
     "id": "panel-smart-hub-v2",

@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: VivintOne public hardware lab, private maintainer workflow, and compatibility catalog
+Description: VivintOne project site, hardware contribution workflow, and compatibility catalog
 
 Parameters:
   HostedZoneId:
@@ -106,7 +106,7 @@ Resources:
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      Description: Approval-only VivintOne Hardware Lab shipping instructions
+      Description: Approval-only VivintOne hardware contribution shipping instructions
       SecretString: CONFIGURE_IN_ADMIN
 
   ReceiptsBucket:
@@ -943,6 +943,46 @@ Resources:
                   TextTransformations: [{ Priority: 0, Type: NONE }]
           VisibilityConfig: { CloudWatchMetricsEnabled: true, MetricName: verification-intent-rate, SampledRequestsEnabled: false }
 
+  SiteRouter:
+    Type: AWS::CloudFront::Function
+    Properties:
+      AutoPublish: true
+      Name: !Sub '${AWS::StackName}-site-router'
+      FunctionConfig:
+        Comment: Clean public routes for the VivintOne project site
+        Runtime: cloudfront-js-2.0
+      FunctionCode: |
+        function handler(event) {
+          var request = event.request;
+          var uri = request.uri;
+
+          if (uri === '/index.html' || uri === '/portal.html') {
+            return {
+              statusCode: 301,
+              statusDescription: 'Moved Permanently',
+              headers: {
+                location: { value: uri === '/index.html' ? '/' : '/requests' },
+                'cache-control': { value: 'public, max-age=3600' }
+              }
+            };
+          }
+
+          if (uri.length > 1 && uri.charAt(uri.length - 1) === '/') {
+            uri = uri.slice(0, -1);
+          }
+
+          if (uri === '/requests') {
+            request.uri = '/portal.html';
+            return request;
+          }
+
+          if (['/compatibility', '/architecture', '/updates', '/hardware'].indexOf(uri) !== -1) {
+            request.uri = '/index.html';
+          }
+
+          return request;
+        }
+
   Distribution:
     Type: AWS::CloudFront::Distribution
     Properties:
@@ -975,6 +1015,9 @@ Resources:
           Compress: true
           CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
           ResponseHeadersPolicyId: !Ref SecurityHeaders
+          FunctionAssociations:
+            - EventType: viewer-request
+              FunctionARN: !GetAtt SiteRouter.FunctionARN
         CacheBehaviors:
           - PathPattern: /api/*
             TargetOriginId: api

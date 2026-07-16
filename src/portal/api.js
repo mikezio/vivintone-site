@@ -19,7 +19,7 @@ function friendlyError(code = '') {
     prepaid_label_not_authorized: 'A prepaid label is not available for this request.',
     prepaid_label_already_exists: 'A prepaid label has already been created for this request.',
     shipping_details_attestation_required: 'Confirm that the packed measurements and return address are accurate.',
-    no_eligible_rate_within_cap: 'No eligible label was available. The Hardware Lab will review the shipment without purchasing postage.',
+    no_eligible_rate_within_cap: 'No eligible label was available. Mike will review the shipment without purchasing postage.',
     receipt_upload_failed: 'The receipt could not be uploaded. Try again with a JPEG, PNG, or PDF under 10 MB.',
   };
   return messages[code] || 'Something went wrong. Your request was not changed; please try again.';

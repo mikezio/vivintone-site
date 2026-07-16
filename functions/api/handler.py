@@ -1,4 +1,4 @@
-"""VivintOne Hardware Lab API.
+"""VivintOne project site and hardware contribution API.
 
 Public routes accept bounded, non-secret hardware offers. Cognito-protected admin
 routes manage the catalog, workflow, templates, and private shipping details.
@@ -68,8 +68,9 @@ SUPPORTED_CARRIERS = {"USPS", "UPS", "FedEx"}
 CONTRIBUTOR_TOKEN_DAYS = 180
 DEFAULT_MAX_LABEL_AMOUNT = Decimal("50.00")
 HARD_MAX_LABEL_AMOUNT = Decimal("100.00")
-logger = Logger(service="vivintone-hardware-lab") if Logger else None
-metrics = Metrics(namespace="VivintOne", service="hardware-lab") if Metrics else None
+SETTINGS_SCHEMA_VERSION = 2
+logger = Logger(service="vivintone-site") if Logger else None
+metrics = Metrics(namespace="VivintOne", service="project-site") if Metrics else None
 
 DEFAULT_PUBLIC_SETTINGS = {
     "title": "Help expand VivintOne hardware support",
@@ -87,10 +88,10 @@ DEFAULT_PUBLIC_SETTINGS = {
 DEFAULT_TEMPLATES = {
     "receivedSubject": "VivintOne hardware request {reference} received",
     "receivedBody": (
-        "Hi {name},\n\nThanks for offering {product} to the VivintOne Hardware Lab. "
-        "Your request reference is {reference}. The VivintOne Hardware Lab will review the model and "
-        "testing value before any shipping is arranged.\n\nDo not send a device "
-        "until you receive an approval email with shipping instructions.\n\n— VivintOne Hardware Lab"
+        "Hi {name},\n\nThanks for offering {product} for VivintOne testing. "
+        "Your request reference is {reference}. I will review the exact model and testing value "
+        "before any shipping is arranged.\n\nDo not send a device until you receive an "
+        "approval email with shipping instructions.\n\nMike\nVivintOne"
     ),
     "approvedSubject": "VivintOne hardware request {reference} approved",
     "approvedBody": (
@@ -101,18 +102,18 @@ DEFAULT_TEMPLATES = {
         "shipping if anything is unclear.\n\nAfter shipping, submit the carrier receipt and "
         "reimbursement details through your private request link:\n{reimbursementUrl}\n\n"
         "Payment is sent only after the hardware is physically received.\n\n"
-        "— VivintOne Hardware Lab"
+        "Mike\nVivintOne"
     ),
     "declinedSubject": "Update on VivintOne hardware request {reference}",
     "declinedBody": (
         "Hi {name},\n\nThank you for offering {product}. VivintOne cannot accept this "
         "hardware request right now.\n\n{message}\n\nPlease keep the device; no shipping "
-        "information is needed. Your offer is still appreciated.\n\n— VivintOne Hardware Lab"
+        "information is needed. Your offer is still appreciated.\n\nMike\nVivintOne"
     ),
     "infoSubject": "More information needed for VivintOne request {reference}",
-    "infoBody": "Hi {name},\n\nBefore reviewing {product}, the VivintOne Hardware Lab needs a little more information:\n\n{message}\n\nReply to this email without sending credentials, serial numbers, QR codes, or alarm details.\n\n— VivintOne Hardware Lab",
+    "infoBody": "Hi {name},\n\nBefore I can review {product}, I need a little more information:\n\n{message}\n\nReply to this email without sending credentials, serial numbers, QR codes, or alarm details.\n\nMike\nVivintOne",
     "reimbursementSubject": "Shipping reimbursement received for {reference}",
-    "reimbursementBody": "Hi {name},\n\nYour shipping reimbursement request for {product} was received under {reference}. Payment will be sent after maintainer review and physical receipt confirmation.\n\n— VivintOne Hardware Lab",
+    "reimbursementBody": "Hi {name},\n\nYour shipping reimbursement request for {product} was received under {reference}. Payment will be sent after I review it and physically confirm the hardware was received.\n\nMike\nVivintOne",
 }
 
 
@@ -373,7 +374,23 @@ def _ensure_seed(table) -> None:
         except ClientError as exc:
             if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
                 raise
+    _migrate_catalog_placeholders(table)
     _ensure_settings(table)
+
+
+def _migrate_catalog_placeholders(table) -> None:
+    """Replace retired seed placeholders without overwriting later catalog edits."""
+    seed = {model["id"]: model for model in _load_seed()}
+    migrations = {
+        "panel-smart-hub-pro-gen2": {"Model identifier being confirmed"},
+    }
+    for model_id, old_values in migrations.items():
+        key = {"pk": "CATALOG", "sk": f"MODEL#{model_id}"}
+        item = table.get_item(Key=key).get("Item", {})
+        if not item or item.get("modelNumber") not in old_values:
+            continue
+        position = item.get("position", 0)
+        table.put_item(Item={**item, **seed[model_id], "position": position, "updatedAt": _now()})
 
 
 def _ensure_settings(table) -> None:
@@ -384,12 +401,28 @@ def _ensure_settings(table) -> None:
     for key, values in defaults:
         try:
             table.put_item(
-                Item={"pk": "SETTINGS", "sk": key, "kind": "settings", "updatedAt": _now(), **values},
+                Item={"pk": "SETTINGS", "sk": key, "kind": "settings", "schemaVersion": SETTINGS_SCHEMA_VERSION, "updatedAt": _now(), **values},
                 ConditionExpression="attribute_not_exists(pk)",
             )
         except ClientError as exc:
             if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
                 raise
+    _migrate_legacy_settings(table)
+
+
+def _migrate_legacy_settings(table) -> None:
+    """Replace retired public language once without overwriting later edits."""
+    for key in ("PUBLIC", "TEMPLATES"):
+        item = table.get_item(Key={"pk": "SETTINGS", "sk": key}).get("Item", {})
+        if not item or int(item.get("schemaVersion", 0)) >= SETTINGS_SCHEMA_VERSION:
+            continue
+        if key == "TEMPLATES":
+            for template_key, default_value in DEFAULT_TEMPLATES.items():
+                if "Hardware Lab" in str(item.get(template_key, "")):
+                    item[template_key] = default_value
+        item["schemaVersion"] = SETTINGS_SCHEMA_VERSION
+        item["updatedAt"] = _now()
+        table.put_item(Item=item)
 
 
 def _catalog(table) -> list[dict[str, Any]]:
@@ -414,7 +447,7 @@ def _render(template: str, values: dict[str, Any]) -> str:
 
 def _send_email(to: str, subject: str, body: str, *, reply_to: str | None = None) -> None:
     payload: dict[str, Any] = {
-        "FromEmailAddress": f"VivintOne Hardware Lab <{FROM_EMAIL}>",
+        "FromEmailAddress": f"VivintOne <{FROM_EMAIL}>",
         "Destination": {"ToAddresses": [to]},
         "Content": {"Simple": {"Subject": {"Data": subject}, "Body": {"Text": {"Data": body}}}},
     }
@@ -866,8 +899,8 @@ def _save_settings(table, body: dict[str, Any]) -> dict[str, Any]:
         maximum = 300 if key.endswith("Subject") else 8000
         normalized_templates[key] = _multiline(templates.get(key, DEFAULT_TEMPLATES[key]), maximum)
     updated = _now()
-    table.put_item(Item={"pk": "SETTINGS", "sk": "PUBLIC", "kind": "settings", "updatedAt": updated, **normalized_public})
-    table.put_item(Item={"pk": "SETTINGS", "sk": "TEMPLATES", "kind": "settings", "updatedAt": updated, **normalized_templates})
+    table.put_item(Item={"pk": "SETTINGS", "sk": "PUBLIC", "kind": "settings", "schemaVersion": SETTINGS_SCHEMA_VERSION, "updatedAt": updated, **normalized_public})
+    table.put_item(Item={"pk": "SETTINGS", "sk": "TEMPLATES", "kind": "settings", "schemaVersion": SETTINGS_SCHEMA_VERSION, "updatedAt": updated, **normalized_templates})
     shipping = _shipping_config()
     if "shippingInstructions" in body:
         shipping["instructions"] = _multiline(body.get("shippingInstructions"), 5000)
@@ -1066,7 +1099,7 @@ def _buy_label(table, request_id: str, body: dict[str, Any], actor: str) -> dict
     table.put_item(Item={"pk": item["pk"], "sk": f"EVENT#{updated}#{secrets.token_hex(3)}", "kind": "audit", "action": "prepaid_label_purchased", "actor": actor, "createdAt": updated})
     warning_text = f"\n\nImportant: {billing_warning}" if billing_warning else ""
     if item.get("email"):
-        _send_email(item["email"], f"Your prepaid shipping label for {request_id}", f"Hi {item['name']},\n\nYour prepaid {rate['carrier']} {rate['service']} label is ready:\n{label_url}\n\nTracking: {shipment.tracking_code}\n\nAttach the label securely and hand the package to the carrier. Tracking updates stay tied to {request_id}.{warning_text}\n\n— VivintOne Hardware Lab", reply_to=ADMIN_EMAIL)
+        _send_email(item["email"], f"Your prepaid shipping label for {request_id}", f"Hi {item['name']},\n\nYour prepaid {rate['carrier']} {rate['service']} label is ready:\n{label_url}\n\nTracking: {shipment.tracking_code}\n\nAttach the label securely and hand the package to the carrier. Tracking updates stay tied to {request_id}.{warning_text}\n\nMike\nVivintOne", reply_to=ADMIN_EMAIL)
     return {"ok": True, "labelUrl": label_url, "trackingNumber": str(shipment.tracking_code), "trackingUrl": direct_url, "carrier": carrier, "service": str(rate["service"]), "status": "label_purchased"}
 
 
@@ -1109,7 +1142,7 @@ def _apply_tracking_update(table, item: dict[str, Any], result: dict[str, str]) 
     if first_delivery:
         note = " If you requested reimbursement, payment is normally sent within 12 hours after physical receipt is confirmed." if item.get("reimbursementStatus") == "submitted" else ""
         if item.get("email"):
-            _send_email(item["email"], f"Carrier delivery update for {item['requestId']}", f"Hi {item['name']},\n\nThe carrier marked your package delivered. It is now awaiting physical receipt confirmation by the VivintOne Hardware Lab.{note}\n\n— VivintOne Hardware Lab", reply_to=ADMIN_EMAIL)
+            _send_email(item["email"], f"Carrier delivery update for {item['requestId']}", f"Hi {item['name']},\n\nThe carrier marked your package delivered. I will physically confirm the hardware was received before any requested reimbursement is sent.{note}\n\nMike\nVivintOne", reply_to=ADMIN_EMAIL)
         _send_email(ADMIN_EMAIL, f"Package delivered for {item['requestId']}", f"The carrier reports delivery. Confirm the hardware physically arrived before marking the request Received or releasing reimbursement.\n\nReview: {SITE_URL}/admin.html?request={item['requestId']}")
 
 
@@ -1292,7 +1325,7 @@ def _mark_reimbursed(table, request_id: str, body: dict[str, Any], actor: str) -
     table.put_item(Item={"pk": item["pk"], "sk": f"EVENT#{updated}#{secrets.token_hex(3)}", "kind": "audit", "action": "reimbursed", "actor": actor, "createdAt": updated})
     try:
         if item.get("email"):
-            _send_email(item["email"], f"Shipping reimbursement sent for {request_id}", f"Hi {item['name']},\n\nYour {item['reimbursementAmount']} USD shipping reimbursement for {item['productName']} has been marked paid through {item['paymentMethod'].title()}.\n\n{note}\n\n— VivintOne Hardware Lab", reply_to=ADMIN_EMAIL)
+            _send_email(item["email"], f"Shipping reimbursement sent for {request_id}", f"Hi {item['name']},\n\nYour {item['reimbursementAmount']} USD shipping reimbursement for {item['productName']} has been marked paid through {item['paymentMethod'].title()}.\n\n{note}\n\nMike\nVivintOne", reply_to=ADMIN_EMAIL)
     except ClientError:
         pass
     return _request_with_history(table, request_id)
