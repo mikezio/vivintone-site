@@ -248,7 +248,14 @@ function SiteHeader() {
     <a href="/hardware">Contribute</a>
     <a href="/requests">My requests</a>
     <a className="github-link" href={GITHUB_URL} target="_blank" rel="noreferrer">GitHub <span aria-hidden="true">↗</span></a>
-  </nav></header>;
+  </nav><details className="mobile-nav"><summary>Menu</summary><div>
+    <a href="/compatibility">Compatibility</a>
+    <a href="/architecture">How it works</a>
+    <a href="/updates">Updates</a>
+    <a href="/hardware">Contribute hardware</a>
+    <a href="/requests">My requests</a>
+    <a href={GITHUB_URL} target="_blank" rel="noreferrer">GitHub <span aria-hidden="true">↗</span></a>
+  </div></details></header>;
 }
 
 function SiteFooter() {

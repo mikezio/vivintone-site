@@ -50,6 +50,14 @@ svg { display: block; }
 .site-header nav a::after { content: ""; position: absolute; left: 0; right: 100%; bottom: 1.15rem; height: 2px; background: var(--purple); transition: right .2s ease; }
 .site-header nav a:hover::after, .site-header nav a:focus-visible::after { right: 0; }
 .site-header .github-link { color: var(--ink); }
+.mobile-nav { display: none; position: relative; }
+.mobile-nav summary { cursor: pointer; list-style: none; padding: .7rem .85rem; border: 1px solid var(--line); border-radius: 6px; color: var(--ink); font-size: .76rem; font-weight: 760; }
+.mobile-nav summary::-webkit-details-marker { display: none; }
+.mobile-nav summary::after { content: "+"; margin-left: .55rem; color: var(--purple); }
+.mobile-nav[open] summary::after { content: "−"; }
+.mobile-nav div { position: absolute; z-index: 20; right: 0; top: calc(100% + .6rem); width: min(78vw, 280px); padding: .55rem; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 18px 44px rgba(23, 11, 59, .18); }
+.mobile-nav a { display: flex; justify-content: space-between; padding: .8rem .75rem; border-radius: 5px; color: var(--ink); text-decoration: none; font-size: .88rem; font-weight: 680; }
+.mobile-nav a:hover, .mobile-nav a:focus-visible { background: var(--paper); color: var(--purple); }
 
 .home-intro {
   min-height: 620px;
@@ -313,10 +321,8 @@ svg { display: block; }
 
 @media (max-width: 760px) {
   .site-header { min-height: 62px; }
-  .site-header nav { gap: 1rem; }
-  .site-header nav a { padding: 1.35rem 0; }
-  .site-header nav a:not(.github-link):not(:first-child) { display: none; }
-  .site-header nav a::after { bottom: .85rem; }
+  .site-header nav { display: none; }
+  .mobile-nav { display: block; }
   .home-intro { min-height: auto; padding-top: 4rem; }
   .home-intro h1 { font-size: clamp(2.7rem, 12vw, 4.4rem); }
   .intro-visual { min-height: 300px; }
